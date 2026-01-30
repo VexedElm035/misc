@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Animated Wallpaper Tubes</title>
+  <style>
+    body { margin: 0; overflow: hidden;}
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<script src="./p5.min.js"></script>
+<script>
+// 2D glowing tubes with subtle S-shaped deformation and fixed positions
+let tubes = [];
+
+const CONFIG = {
+  // escena
+  tubeCount: 3,
+  segments: 900,
+  globalSpeed: 0.01,
+  // fondos disponibles y el índice activo
+  bgs: [
+    [0, 81, 155],    // #00519B
+    [0, 100, 118], // #006476 [132, 143, 151] #848F97
+    [238, 138, 14],  // #EE8A0E
+    [63, 26, 185],   // #3F1AB9
+  ],
+  bgIndex: 0,
+  // ciclo del background
+  bgCycle: {
+    holdSec: 1800,       // 30 minutos
+    transitionSec: 15,   // 15 segundos
+  },
+
+  // colocación
+  maxPlacementTries: 40,
+  minDistFactor: 2.5,
+
+  // propiedades de los tubos (rangos)
+  tube: {
+    lengthMin: 3000,
+    lengthMax: 4000,
+    radiusMin: 200,
+    radiusMax: 400,
+    amplitudeMin: 50,
+    amplitudeMax: 150,
+    cyclesMin: 0.9,
+    cyclesMax: 1.3,
+    phaseSpeedMin: 0.5,   // se multiplicará por globalSpeed
+    phaseSpeedMax: 1.2,
+  },
+
+  // estilo (derivado del background)
+  fillTargetB: 10,   // brillo 0..100 del relleno
+  fillAlpha: 0.10,   // opacidad del relleno
+  edgeTargetB: 100,  // brillo 0..100 del borde
+  edgeTargetS: 50,    // saturación 0..100 del borde (más bajo => más hacia blanco)
+  edgeAlpha: 40,      // opacidad del borde (0..1 o 0..100)
+  // parámetros de color exclusivos del degradado del borde
+  edgeGradientTargetB: 100, // brillo 0..100 del degradado
+  edgeGradientTargetS: 100,  // saturación 0..100 del degradado
+  edgeGradientAlpha: 100,    // opacidad del degradado (0..1 o 0..100)
+
+  // degradado interior del borde
+  edgeGradient: {
+    innerSteps: 4,
+    innerWidthFrom: 0.22, // ancho relativo al radio del tubo
+    innerWidthTo: 0.06, 
+    innerAlphaFrom: 1.0,
+    innerAlphaTo: 0.1,
+  },
+  // borde sólido base (en píxeles), sobre el que se aplica el degradado
+  solidEdgePx: 2,
+  
+  // ciclo de vida por tubo (segundos)
+  lifecycle: {
+    initialDelay: 3,     // tiempo global inicial antes de que empiecen a aparecer
+    appearMin: 10,
+    appearMax: 20,
+    lifeMin: 30,
+    lifeMax: 60,
+    disappearMin: 10,
+    disappearMax: 20,
+  },
+};
+
+// Baseline para escalado responsivo
+const BASE = { w: 1920, h: 1200 };
+let SCALE = 1;
+let SEGMENTS = CONFIG.segments; // efectivo, recalculado con el tamaño
+let lastBodyBg = '';
+// estado del ciclo de background y color activo mezclado
+let BG_CYCLE_STATE = null; // { currentIdx, nextIdx, dir, state, stateStartSec }
+let GLOBAL_BG = null;      // [r,g,b] mezclado actual
+
+function setup() {
+  createCanvas(windowWidth, windowHeight); // 2D renderer
+  strokeCap(ROUND);
+  strokeJoin(ROUND);
+  noFill();
+
+  recomputeScale();
+  SEGMENTS = max(300, Math.round(CONFIG.segments * SCALE));
+
+  // posiciones fijas, dispersas por la pantalla con ligera evitación de solape
+  for (let i = 0; i < CONFIG.tubeCount; i++) {
+    tubes.push(placeTubeAvoidingOverlap());
+  }
+
+  initBgCycle();
+}
+
+function draw() {
+  // Deja el canvas transparente para que se vea siempre el gradiente CSS del body
+  clear();
+  const nowSec = millis() / 1000;
+  updateBgCycle(nowSec);
+  const BG = activeBgRGB(nowSec);
+  GLOBAL_BG = BG;
+  syncBodyGradient(BG);
+
+  const t = nowSec;
+  for (const tube of tubes) {
+  tube.update(t);
+  tube.display(t);
+  }
+}
+
+// Utilidad: re-aplicar alpha manteniendo el mismo color RGB
+function colorWithAlpha(col, alpha01) {
+  return color(red(col), green(col), blue(col), constrain(alpha01, 0, 1) * 255);
+}
+
+// Aclara oscurece fijando brillo absoluto (HSB) manteniendo hue y saturación
+function setBrightness(col, targetB01, alpha01) {
+  push();
+  colorMode(HSB, 360, 100, 100, 1);
+  const h = hue(col);
+  const s = saturation(col);
+  const out = color(h, s, constrain(targetB01 * 100, 0, 100), constrain(alpha01, 0, 1));
+  pop();
+  return out;
+}
+
+// Fija saturación y brillo (HSB) manteniendo el tono. Útil para llevar el borde hacia una versión más blanca del fondo.
+function setSaturationAndBrightness(col, targetS01, targetB01, alpha01) {
+  push();
+  colorMode(HSB, 360, 100, 100, 1);
+  const h = hue(col);
+  const s = constrain(targetS01 * 100, 0, 100);
+  const b = constrain(targetB01 * 100, 0, 100);
+  const out = color(h, s, b, constrain(alpha01, 0, 1));
+  pop();
+  return out;
+}
+
+// (helpers innecesarios eliminados para optimización)
+
+class Tube2D {
+  constructor({ x, y, angle, length, radius, baseColor, amplitude, cycles, phaseSpeed, phase0, glow }) {
+    this.pos = createVector(x, y); // centro del tubo
+    this.angle = angle;            // orientación (rad)
+    this.length = length;          // largo del tubo
+    this.radius = radius;          // grosor base
+    this.baseColor = baseColor;    // color principal
+    this.amplitude = amplitude;    // amplitud de la serpenteo (px)
+    this.cycles = cycles;          // ondas a lo largo del tubo
+    this.phaseSpeed = phaseSpeed;  // velocidad de la fase
+    this.phase0 = phase0;          // fase inicial
+    this.glow = glow;              // intensidad glow base
+
+    // vectores de dirección y normal
+    this.dir = p5.Vector.fromAngle(this.angle);
+    this.nrm = createVector(-this.dir.y, this.dir.x);
+
+    // ciclo de vida
+    this.state = 'waiting'; // 'waiting' | 'appearing' | 'visible' | 'disappearing'
+    this.stateStart = 0;
+    this.opacity = 0; // 0..1
+    this.appearDur = 12;     // defaults, se sobreescriben en initLifecycle
+    this.lifeDur = 45;
+    this.disappearDur = 12;
+  }
+
+  initLifecycle(nowSec) {
+    // inicia en espera del retardo global inicial
+    this.state = 'waiting';
+    this.stateStart = nowSec;
+    this.opacity = 0;
+    this.randomizeLifecycleDurations();
+  }
+
+  randomizeLifecycleDurations() {
+    this.appearDur = random(CONFIG.lifecycle.appearMin, CONFIG.lifecycle.appearMax);
+    this.lifeDur = random(CONFIG.lifecycle.lifeMin, CONFIG.lifecycle.lifeMax);
+    this.disappearDur = random(CONFIG.lifecycle.disappearMin, CONFIG.lifecycle.disappearMax);
+  }
+
+  static random() {
+    // colores fríos con glow tipo cian/azul
+    const col = color(random(80, 140), random(180, 255), 255, 255);
+    const t = new Tube2D({
+      x: random(width * 0.1, width * 0.9),
+      y: random(height * 0.1, height * 0.9),
+      angle: random(TWO_PI),
+      length: random(CONFIG.tube.lengthMin, CONFIG.tube.lengthMax),
+      radius: random(CONFIG.tube.radiusMin, CONFIG.tube.radiusMax),
+      baseColor: col,
+      amplitude: random(CONFIG.tube.amplitudeMin, CONFIG.tube.amplitudeMax),
+      cycles: random(CONFIG.tube.cyclesMin, CONFIG.tube.cyclesMax),
+      phaseSpeed: random(CONFIG.tube.phaseSpeedMin, CONFIG.tube.phaseSpeedMax) * CONFIG.globalSpeed,
+      phase0: random(TWO_PI),
+      glow: random(0.8, 1.3),
+    });
+    t.initLifecycle((millis ? millis() : 0) / 1000);
+    return t;
+  }
+
+  // re-randomiza los atributos del tubo (como si fuera otro) manteniendo el ciclo
+  randomizeAttributes() {
+    const r = Tube2D.random();
+    // copiar atributos relevantes
+    this.pos = r.pos;
+    this.angle = r.angle;
+    this.length = r.length;
+    this.radius = r.radius;
+    this.baseColor = r.baseColor;
+    this.amplitude = r.amplitude;
+    this.cycles = r.cycles;
+    this.phaseSpeed = r.phaseSpeed;
+    this.phase0 = r.phase0;
+    this.glow = r.glow;
+    this.dir = r.dir;
+    this.nrm = r.nrm;
+    // mantener lifecycle durations ya asignadas en random();
+    this.appearDur = r.appearDur;
+    this.lifeDur = r.lifeDur;
+    this.disappearDur = r.disappearDur;
+    this.opacity = 0;
+    // estado se gestionará por update()
+  }
+
+  update(nowSec) {
+    const elapsed = nowSec - this.stateStart;
+    const delay = CONFIG.lifecycle.initialDelay;
+    switch (this.state) {
+      case 'waiting':
+        this.opacity = 0;
+        if (elapsed >= delay) {
+          this.state = 'appearing';
+          this.stateStart = nowSec;
+        }
+        break;
+      case 'appearing': {
+        const p = constrain(elapsed / max(0.001, this.appearDur), 0, 1);
+        this.opacity = p;
+        if (p >= 1) {
+          this.state = 'visible';
+          this.stateStart = nowSec;
+          this.opacity = 1;
+        }
+        break; }
+      case 'visible':
+        this.opacity = 1;
+        if (elapsed >= this.lifeDur) {
+          this.state = 'disappearing';
+          this.stateStart = nowSec;
+        }
+        break;
+      case 'disappearing': {
+        const p = constrain(elapsed / max(0.001, this.disappearDur), 0, 1);
+        this.opacity = 1 - p;
+        if (p >= 1) {
+          // terminó: re-randomizar y volver a esperar el delay
+          this.randomizeAttributes();
+          this.state = 'waiting';
+          this.stateStart = nowSec;
+          this.opacity = 0;
+        }
+        break; }
+    }
+  }
+
+  // función auxiliar para dibujar una pasada del trazo con glow
+  drawPass(points, weight, col, blur) {
+    push();
+    stroke(col);
+    strokeWeight(weight);
+    const ctx = drawingContext; // CanvasRenderingContext2D
+    ctx.shadowBlur = blur;
+    ctx.shadowColor = `rgba(${red(col)}, ${green(col)}, ${blue(col)}, ${alpha(col) / 255})`;
+
+    beginShape();
+    for (const p of points) vertex(p.x, p.y);
+    endShape();
+
+    // limpiar sombra para no afectar otros elementos
+    ctx.shadowBlur = 0;
+    pop();
+  }
+
+  makePathPoints(t) {
+    const pts = [];
+  const segs = SEGMENTS;
+    for (let i = 0; i <= segs; i++) {
+      const u = i / segs;             // 0..1 a lo largo del tubo
+      const s = (u - 0.5) * this.length; // -L/2 .. L/2
+
+      // base sobre el eje del tubo
+      const bx = this.pos.x + this.dir.x * s;
+      const by = this.pos.y + this.dir.y * s;
+
+  // offset senoidal suavizado en los extremos (taper)
+  const taper = sin(PI * constrain(u, 0, 1)); // 0 en extremos, 1 al centro
+      const phase = this.phase0 + t * this.phaseSpeed * TWO_PI;
+  // onda principal (S) con un sutil segundo armónico para dar "cuerpo"
+  const base = TWO_PI * this.cycles * u + phase;
+  const wave = sin(base) + 0.3 * sin(2 * base);
+      const offset = this.amplitude * wave * taper;
+
+      const px = bx + this.nrm.x * offset;
+      const py = by + this.nrm.y * offset;
+      pts.push(createVector(px, py));
+    }
+    return pts;
+  }
+
+  display(t) {
+    const pts = this.makePathPoints(t);
+    const R = this.radius;
+
+    // 1) Calcular bordes izquierdo y derecho del tubo a partir de normales por punto
+    const { leftPts, rightPts } = this.makeStripPoints(pts, R);
+
+    // 2) Relleno del tubo: color de fondo, algo más claro y con opacidad 0.2
+  const _bg = GLOBAL_BG || CONFIG.bgs[CONFIG.bgIndex];
+  const bgCol = color(_bg[0], _bg[1], _bg[2]);
+  const fillCol = setBrightness(bgCol, CONFIG.fillTargetB / 100, CONFIG.fillAlpha * this.opacity);
+    this.fillStrip(leftPts, rightPts, fillCol);
+
+  // 3) Bordes del tubo: color del borde sólido y del degradado separados
+    const edgeWeight = max(1, R * 0.01);
+    // Color del borde sólido (usa edgeTarget*)
+  const alphaSolidNormBase = CONFIG.edgeAlpha > 1 ? CONFIG.edgeAlpha / 100 : CONFIG.edgeAlpha;
+  const alphaSolidNorm = alphaSolidNormBase * this.opacity;
+  const edgeSolidBase = setSaturationAndBrightness(
+    bgCol,
+    CONFIG.edgeTargetS / 100,
+    CONFIG.edgeTargetB / 100,
+    alphaSolidNorm
+  );
+    // Color del degradado (usa edgeGradientTarget*)
+  const alphaGradNormBase = CONFIG.edgeGradientAlpha > 1 ? CONFIG.edgeGradientAlpha / 100 : CONFIG.edgeGradientAlpha;
+  const alphaGradNorm = alphaGradNormBase * this.opacity;
+  const edgeGradBase = setSaturationAndBrightness(
+    bgCol,
+    CONFIG.edgeGradientTargetS / 100,
+    CONFIG.edgeGradientTargetB / 100,
+    alphaGradNorm
+  );
+  // 3a) Borde sólido fino (en px), separado del degradado
+  this.drawSolidEdge(leftPts, edgeSolidBase, CONFIG.solidEdgePx);
+  this.drawSolidEdge(rightPts, edgeSolidBase, CONFIG.solidEdgePx);
+    // En leftPts el normal "izquierda" apunta hacia fuera, así que para ir hacia dentro usamos -1
+  this.drawEdgeGradient(leftPts, edgeGradBase, edgeWeight, R, -1);
+  // En rightPts el normal "izquierda" apunta hacia el interior, así que para ir hacia dentro usamos +1
+  this.drawEdgeGradient(rightPts, edgeGradBase, edgeWeight, R, +1);
+  }
+
+  // construir los puntos de los bordes izquierdo y derecho (strip) usando normales locales
+  makeStripPoints(centerPts, radius) {
+    const N = centerPts.length;
+    const left = new Array(N);
+    const right = new Array(N);
+    for (let i = 0; i < N; i++) {
+      const p = centerPts[i];
+      const p0 = centerPts[max(0, i - 1)];
+      const p1 = centerPts[min(N - 1, i + 1)];
+      let tx = p1.x - p0.x;
+      let ty = p1.y - p0.y;
+      const len = Math.hypot(tx, ty) || 1;
+      tx /= len; ty /= len;          // tangente unitaria
+      const nx = -ty, ny = tx;       // normal a la izquierda
+      left[i] = createVector(p.x + nx * radius, p.y + ny * radius);
+      right[i] = createVector(p.x - nx * radius, p.y - ny * radius);
+    }
+    return { leftPts: left, rightPts: right };
+  }
+
+  // rellenar el tubo como un polígono que recorre borde izq -> borde der regresando
+  fillStrip(leftPts, rightPts, col) {
+    push();
+    noStroke();
+    fill(col);
+    beginShape();
+    for (const p of leftPts) vertex(p.x, p.y);
+    for (let i = rightPts.length - 1; i >= 0; i--) {
+      const p = rightPts[i];
+      vertex(p.x, p.y);
+    }
+    endShape(CLOSE);
+    pop();
+  }
+
+  // Dibuja el borde con degradado interior (hacia dentro). inwardSign: -1 para desplazar a la derecha (izq->adentro), +1 para desplazar a la izquierda (der->adentro)
+  drawEdgeGradient(edgePts, baseCol, baseWeight, R, inwardSign) {
+    const cfg = CONFIG.edgeGradient;
+    // Degradado hacia adentro
+    for (let i = 0; i < cfg.innerSteps; i++) {
+      const t = i / max(1, cfg.innerSteps - 1);
+      const wFrac = lerp(cfg.innerWidthFrom, cfg.innerWidthTo, t);
+      const aFrac = lerp(cfg.innerAlphaFrom, cfg.innerAlphaTo, t);
+      const w = max(1, R * wFrac);
+      // desplazar medio ancho hacia adentro desde el borde, dependiendo del lado
+      const d = (w / 2) * (inwardSign || -1);
+      const path = this.offsetPolyline(edgePts, d);
+      const col = colorWithAlpha(baseCol, (alpha(baseCol) / 255) * aFrac);
+      this.drawPass(path, w, col, 0);
+    }
+  }
+
+  // Trazo sólido fino en el borde (grosor en px)
+  drawSolidEdge(edgePts, col, px) {
+    const w = max(1, px | 0);
+    this.drawPass(edgePts, w, col, 0);
+  }
+
+  // Desplaza una polilínea según su normal local una distancia escalar
+  offsetPolyline(points, dist) {
+    const N = points.length;
+    const out = new Array(N);
+    for (let i = 0; i < N; i++) {
+      const p0 = points[max(0, i - 1)];
+      const p1 = points[min(N - 1, i + 1)];
+      let tx = p1.x - p0.x;
+      let ty = p1.y - p0.y;
+      const len = Math.hypot(tx, ty) || 1;
+      tx /= len; ty /= len;
+      const nx = -ty, ny = tx; // normal izquierda de la polilínea
+      const p = points[i];
+      out[i] = createVector(p.x + nx * dist, p.y + ny * dist);
+    }
+    return out;
+  }
+}
+
+// ——— utilidades de colocación para evitar solapes fuertes ———
+function placeTubeAvoidingOverlap() {
+  for (let attempt = 0; attempt < CONFIG.maxPlacementTries; attempt++) {
+    const t = Tube2D.random();
+    let ok = true;
+    for (const e of tubes) {
+      const d = p5.Vector.dist(t.pos, e.pos);
+      const minDist = (t.radius + e.radius) * CONFIG.minDistFactor + 100; // colchón adicional
+      if (d < minDist) { ok = false; break; }
+
+      // si están relativamente cerca, intenta separar orientaciones para reducir intersección visual
+      if (d < (t.length + e.length) * 0.35) {
+        const dang = Math.abs(angleDiff(t.angle, e.angle));
+        if (dang < radians(15)) { ok = false; break; }
+      }
+    }
+    if (ok) return t;
+  }
+  // fallback si no encuentra buen lugar
+  return Tube2D.random();
+}
+
+function angleDiff(a, b) {
+  return Math.atan2(Math.sin(a - b), Math.cos(a - b));
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  recomputeScale();
+  SEGMENTS = max(300, Math.round(CONFIG.segments * SCALE));
+}
+
+// ——— fondo con degradado inteligente (izquierda color base, derecha más oscuro) ———
+function drawBackgroundGradient(rgbLeft) {
+  const ctx = drawingContext;
+  // color base izquierda
+  const leftCol = color(rgbLeft[0], rgbLeft[1], rgbLeft[2]);
+  // color derecha: mismo tono, brillo más bajo (18%)
+  const rightCol = setBrightness(leftCol, 0.18, 1);
+
+  const grad = ctx.createLinearGradient(0, 0, width, 0); // L->R
+  const l = `rgba(${red(rightCol)}, ${green(rightCol)}, ${blue(rightCol)}, 1)`;
+  const r = `rgba(${red(leftCol)}, ${green(leftCol)}, ${blue(leftCol)}, 1)`;
+  grad.addColorStop(0, l);
+  grad.addColorStop(1, r);
+
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, width, height);
+}
+
+function syncBodyGradient(rgbLeft) {
+  if (!document || !document.body) return;
+  const leftCol = color(rgbLeft[0], rgbLeft[1], rgbLeft[2]); setBrightness(leftCol, 0.18, 1);
+  const rightCol = setBrightness(leftCol, 0.18, 1);
+  const css = `linear-gradient(180deg, rgba(${red(leftCol)},${green(leftCol)},${blue(leftCol)},1) 0%, rgba(${red(rightCol)},${green(rightCol)},${blue(rightCol)},1) 100%)`;
+  if (css !== lastBodyBg) {
+    document.body.style.background = css;
+    lastBodyBg = css;
+  }
+}
+
+// ——— Ciclo de background con transición suave en HSB ———
+function initBgCycle() {
+  const startIdx = CONFIG.bgIndex || 0;
+  BG_CYCLE_STATE = {
+    currentIdx: startIdx,
+    nextIdx: nextBgIndex(startIdx, +1),
+    dir: +1,
+    state: 'hold', // 'hold' | 'transition'
+    stateStartSec: millis() / 1000,
+  };
+}
+
+function nextBgIndex(idx, dir) {
+  const last = CONFIG.bgs.length - 1;
+  if (idx <= 0 && dir < 0) return 1;  // rebotar hacia dentro
+  if (idx >= last && dir > 0) return last - 1; // rebotar hacia dentro
+  return idx + dir;
+}
+
+function updateBgCycle(nowSec) {
+  if (!BG_CYCLE_STATE) return;
+  const s = BG_CYCLE_STATE;
+  const hold = CONFIG.bgCycle.holdSec;
+  const trans = CONFIG.bgCycle.transitionSec;
+  const elapsed = nowSec - s.stateStartSec;
+  if (s.state === 'hold') {
+    if (elapsed >= hold) {
+      s.state = 'transition';
+      s.stateStartSec = nowSec;
+    }
+  } else if (s.state === 'transition') {
+    if (elapsed >= trans) {
+      // completar transición
+      s.currentIdx = s.nextIdx;
+      // cambiar dirección en extremos para ping-pong 0..N..0
+      const last = CONFIG.bgs.length - 1;
+      if (s.currentIdx === 0) s.dir = +1;
+      else if (s.currentIdx === last) s.dir = -1;
+      s.nextIdx = nextBgIndex(s.currentIdx, s.dir);
+      s.state = 'hold';
+      s.stateStartSec = nowSec;
+      CONFIG.bgIndex = s.currentIdx; // mantener índice coherente
+    }
+  }
+}
+
+function activeBgRGB(nowSec) {
+  if (!BG_CYCLE_STATE) return CONFIG.bgs[CONFIG.bgIndex];
+  const s = BG_CYCLE_STATE;
+  if (s.state === 'hold') return CONFIG.bgs[s.currentIdx];
+  const t = constrain((nowSec - s.stateStartSec) / max(0.001, CONFIG.bgCycle.transitionSec), 0, 1);
+  const a = CONFIG.bgs[s.currentIdx];
+  const b = CONFIG.bgs[s.nextIdx];
+  const col = lerpHSB_RGB(a, b, t);
+  return [Math.round(red(col)), Math.round(green(col)), Math.round(blue(col))];
+}
+
+// Interpolación suave en HSB (hue por el camino corto), devuelve p5.Color
+function lerpHSB_RGB(rgbA, rgbB, t) {
+  const a = color(rgbA[0], rgbA[1], rgbA[2]);
+  const b = color(rgbB[0], rgbB[1], rgbB[2]);
+  push();
+  colorMode(HSB, 360, 100, 100, 1);
+  const h1 = hue(a), h2 = hue(b);
+  const s1 = saturation(a), s2 = saturation(b);
+  const v1 = brightness(a), v2 = brightness(b);
+  // hue por camino corto
+  let dh = ((h2 - h1 + 540) % 360) - 180;
+  const h = (h1 + dh * t + 360) % 360;
+  const s = lerp(s1, s2, t);
+  const v = lerp(v1, v2, t);
+  const out = color(h, s, v, 1);
+  pop();
+  return out;
+}
+
+function recomputeScale() {
+  SCALE = Math.max(0.5, Math.min(2.0, Math.min(width / BASE.w, height / BASE.h)));
+}
+</script>
+</body>
+</html>
