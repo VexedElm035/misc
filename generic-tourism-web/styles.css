@@ -1,0 +1,148 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html, body{
+  padding: 0;
+  margin: 0;
+  max-width: 100vw;
+}
+
+.header-container{
+  width: auto;
+  position: relative;
+  height: 100dvh;
+  overflow: hidden;
+  padding: 30px 80px;
+}
+
+.hero-media,
+.hero-overlay{
+  position: absolute;
+  inset: 0;
+}
+
+.hero-media img,
+.hero-media video{
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.hero-overlay{
+  background: rgba(0,0,0,0.45); /* filtro oscuro */
+}
+
+.hero-content{
+  position: relative;
+  z-index: 2;
+  height: 100%;
+}
+
+.header-content{
+  width: 100%;
+  height: 450%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: start;
+  gap: 5px;
+  color: #ffffff;
+}
+
+/* SECTION: INFO */
+
+.info-container{
+  width: 100%;
+  display: flex;
+  flex-direction: row;
+  justify-content: end;
+  align-items: center;
+  gap: 20px;
+}
+
+.lang-switch{
+  display: flex;
+  flex-direction: row;
+  gap: 5px;
+}
+
+.lang-switch input{
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.lang-switch{
+  color: #969696;
+  user-select: none;
+  -webkit-user-select: none;
+  font-size: 14px;
+}
+
+.lang-switch-left{
+  color: #ffffff;
+}
+
+.lang-switch-right {
+  color: #969696;
+}
+
+.lang-switch input:checked ~ .lang-switch-left{
+  color: #969696;
+}
+
+.lang-switch input:checked ~ .lang-switch-right{
+  color: #ffffff;
+}
+
+.logo-container{
+  width: auto;
+  display: flex;
+  flex-direction: row;
+  gap: 10px;
+  justify-content: center;
+  align-items: center;
+}
+
+.logo-item{
+  width: 15px;
+  height: 15px;
+  filter: brightness(0) invert(1);
+}
+
+/* SECTION: Navigation */
+
+.navigation-container{
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items:flex-start;
+}
+
+.main-logo {
+  width: 200px;
+  height: 200px;
+  /* filter: brightness(0) invert(1); */
+  
+}
+
+.navigation-items{
+  width: auto;
+  display: flex;
+  flex-direction: row;
+  gap: 20px;
+}
+
+.navigation-items li{
+  list-style: none;
+}
+
+.navigation-items li a{
+  text-decoration: none;
+  color: #d8d8d8;
+  font-size: 14px;
+}
+
