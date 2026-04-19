@@ -1,0 +1,12 @@
+# Stem Player — mdx_extra_q streaming
+# ──────────────────────────────────────
+# Dependencias Python necesarias
+
+torch>=2.1.0
+torchaudio>=2.1.0
+# Demucs 4 (incluye demucs.api.Separator) no soporta Python 3.12+
+demucs==4.0.1; python_version >= "3.10" and python_version < "3.12"
+diffq>=0.2.4
+sounddevice>=0.4.6
+soundfile>=0.12.1
+numpy>=1.24.0

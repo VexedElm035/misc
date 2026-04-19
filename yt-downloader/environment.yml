@@ -1,0 +1,8 @@
+name: ytmusic-cli
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - yt-dlp>=2025.1.0
